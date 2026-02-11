@@ -19,6 +19,13 @@ class Credentials:
 
 
 @dataclass
+class SmsChallenge:
+    challenge_token: str
+    expire_date: str
+    expire_in: int
+
+
+@dataclass
 class AuthDetails:
     inn: str
     token: Token

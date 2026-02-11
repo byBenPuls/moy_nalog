@@ -8,10 +8,11 @@ from functools import wraps
 
 from httpx import AsyncClient, HTTPStatusError, Timeout
 
-from moy_nalog.types import Credentials, Token, AuthDetails
+from moy_nalog.types import Credentials, Token, AuthDetails, SmsChallenge
 from moy_nalog.exceptions import AuthorizationError, AccessTokenNotFoundError
 
 BASE_URL = "https://lknpd.nalog.ru/api/v1"
+BASE_URL_V2 = "https://lknpd.nalog.ru/api/v2"
 
 HEADERS = {
     "accept": "application/json, text/plain, */*",
@@ -21,13 +22,17 @@ HEADERS = {
 
 
 class HttpAuth:
-    def __init__(self, async_client: AsyncClient, credentials: Credentials) -> None:
+    def __init__(
+        self,
+        async_client: AsyncClient,
+        credentials: Optional[Credentials] = None,
+    ) -> None:
         """
         This class helps to get accessToken for Bearer auth
         """
         self._async_client: AsyncClient = async_client
         self._device_id: str = self._create_device_id()
-        self.__credentials: Credentials = credentials
+        self.__credentials: Optional[Credentials] = credentials
 
         self.__auth_data: Optional[AuthDetails] = None
 
@@ -58,9 +63,9 @@ class HttpAuth:
                 "appVersion": "1.0.0",
                 "metaDetails": {
                     "userAgent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_2_2)"
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                         " AppleWebKit/537.36 (KHTML, like Gecko)"
-                        " Chrome/88.0.4324.192 Safari/537.36"
+                        " Chrome/131.0.0.0 Safari/537.36"
                     )
                 },
             }
@@ -100,6 +105,46 @@ class HttpAuth:
         )
 
     @handle_auth_exception
+    async def request_sms_code(self, phone: str) -> SmsChallenge:
+        response = await self._async_client.post(
+            f"{BASE_URL_V2}/auth/challenge/sms/start",
+            json={
+                "phone": phone,
+                "requireTpToBeActive": True,
+                "deviceData": {"sourceType": "WEB"},
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return SmsChallenge(
+            challenge_token=data["challengeToken"],
+            expire_date=data["expireDate"],
+            expire_in=data["expireIn"],
+        )
+
+    @handle_auth_exception
+    async def verify_sms_code(
+        self, phone: str, code: str, challenge_token: str
+    ) -> AuthDetails:
+        body = self.create_json_body(
+            phone=phone,
+            code=code,
+            challengeToken=challenge_token,
+        )
+        response = await self.make_request("/auth/challenge/sms/verify", body)
+        self.__auth_data = AuthDetails(
+            inn=response["profile"]["inn"],
+            token=Token(
+                value=response["token"],
+                expire_in=datetime.fromisoformat(
+                    response["tokenExpireIn"].replace("Z", "+00:00")
+                ),
+                refresh_value=response["refreshToken"],
+            ),
+        )
+        return self.__auth_data
+
+    @handle_auth_exception
     async def update_access_token(self) -> str:
         response = await self.make_request(
             "/auth/token/",
@@ -135,7 +180,13 @@ class HttpAuth:
 
     async def get_bearer_auth_header(self) -> dict:
         if not self.is_authed:
-            self.__auth_data = await self.get_token()
+            if self.__credentials:
+                self.__auth_data = await self.get_token()
+            else:
+                raise AuthorizationError(
+                    "Not authenticated. Call verify_sms_code() first "
+                    "or provide login/password credentials."
+                )
         if not self.access_token_is_active:
             self.__auth_data.token.value = await self.update_access_token()
         return self._create_bearer_auth_header(self.__auth_data.token.value)
@@ -144,13 +195,13 @@ class HttpAuth:
 class HttpConnection:
     def __init__(
         self,
-        credentials: Credentials,
+        credentials: Optional[Credentials] = None,
         timeout: float = 5.0,
         read_timeout: float = 5.0,
         write_timeout: float = 5.0,
         connect_timeout: float = 5.0,
     ) -> None:
-        self.__credentials: Credentials = credentials
+        self.__credentials: Optional[Credentials] = credentials
         self._timeout = timeout
         self._read_timeout = read_timeout
         self._write_timeout = write_timeout

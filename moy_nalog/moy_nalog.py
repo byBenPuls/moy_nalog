@@ -11,20 +11,29 @@ from moy_nalog.methods import (
 from moy_nalog.methods.api import BaseAPI
 from moy_nalog.http import HttpConnection, AuthDetails
 from moy_nalog.constants import CancelType
-from moy_nalog.types import Credentials, Income, CanceledIncome, User
+from moy_nalog.exceptions import AuthorizationError
+from moy_nalog.types import Credentials, Income, CanceledIncome, User, SmsChallenge
 
 
 class MoyNalog:
-    def __init__(self, login: str, password: str) -> None:
+    def __init__(
+        self,
+        login: Optional[str] = None,
+        password: Optional[str] = None,
+        phone: Optional[str] = None,
+    ) -> None:
         self.__login = login
         self.__password = password
+        self.__phone = phone
 
         self._connection: HttpConnection = self._init_http()
         self._api: BaseAPI = self._init_api()
 
     @property
-    def credentials(self) -> Credentials:
-        return Credentials(self.__login, self.__password)
+    def credentials(self) -> Optional[Credentials]:
+        if self.__login and self.__password:
+            return Credentials(self.__login, self.__password)
+        return None
 
     @property
     def auth_details(self) -> Optional[AuthDetails]:
@@ -35,6 +44,24 @@ class MoyNalog:
 
     def _init_api(self) -> BaseAPI:
         return BaseAPI(self._connection)
+
+    async def request_sms_code(self) -> SmsChallenge:
+        if not self.__phone:
+            raise AuthorizationError(
+                "Phone number is required for SMS authentication"
+            )
+        return await self._connection.auth.request_sms_code(self.__phone)
+
+    async def verify_sms_code(
+        self, code: str, challenge_token: str
+    ) -> AuthDetails:
+        if not self.__phone:
+            raise AuthorizationError(
+                "Phone number is required for SMS authentication"
+            )
+        return await self._connection.auth.verify_sms_code(
+            self.__phone, code, challenge_token
+        )
 
     async def add_income(
         self,
@@ -74,7 +101,9 @@ class MoyNalog:
         return "MoyNalog()"
 
     def __hash__(self) -> int:
-        return hash(f"{self.credentials.username}:{self.credentials.password}")
+        if self.__login and self.__password:
+            return hash(f"{self.__login}:{self.__password}")
+        return hash(self.__phone)
 
     def __eq__(self, value: Any) -> bool:
         if not isinstance(value, MoyNalog):
